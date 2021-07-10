@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use http::StatusCode;
 use image::ImageError;
 use uuid::Uuid;
 use warp::reply::Response;
@@ -18,32 +19,26 @@ struct ResizeQuery {
     pub height: Option<u32>,
 }
 
-async fn resize(
-    path: PathBuf,
-    query: ResizeQuery,
-    image_directory: Arc<PathBuf>,
-) -> Result<Response, Infallible> {
+async fn resize(path: PathBuf, query: ResizeQuery, image_directory: Arc<PathBuf>) -> Response {
     let image = image_directory.join(&path);
 
     let resize_task = tokio::task::spawn_blocking(move || {
         image_resizer::resize(image, query.width, query.height)
     });
 
-    let response = match resize_task.await {
+    match resize_task.await {
         Ok(Err(ImageError::IoError(e))) if e.kind() == ErrorKind::NotFound => {
-            warp::reply::with_status(warp::reply(), http::StatusCode::NOT_FOUND).into_response()
+            warp::reply::with_status(warp::reply(), StatusCode::NOT_FOUND).into_response()
         }
         Err(_) | Ok(Err(_)) => {
-            warp::reply::with_status(warp::reply(), http::StatusCode::INTERNAL_SERVER_ERROR)
+            warp::reply::with_status(warp::reply(), StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response()
         }
         Ok(Ok(bytes)) => http::response::Builder::new()
-            .status(200)
+            .status(StatusCode::OK)
             .body(bytes)
             .into_response(),
-    };
-
-    Ok(response)
+    }
 }
 
 fn remaining_path() -> impl Filter<Extract = (PathBuf,), Error = Infallible> + Copy {
@@ -55,13 +50,17 @@ fn with_data<T: Clone + Send>(data: T) -> impl Filter<Extract = (T,), Error = In
     warp::any().map(move || data.clone())
 }
 
+async fn no_error(fut: impl Future<Output = Response>) -> Result<Response, Infallible> {
+    Ok(fut.await)
+}
+
 pub fn start(
     http_settings: &HttpSettings,
     image_directory: PathBuf,
 ) -> (SocketAddr, impl Future<Output = ()> + 'static) {
     let get_health_check = warp::path("health-check")
         .and(warp::get())
-        .map(|| http::StatusCode::NO_CONTENT);
+        .map(|| StatusCode::NO_CONTENT);
 
     let image_directory = Arc::new(image_directory);
 
@@ -69,7 +68,8 @@ pub fn start(
         .and(remaining_path())
         .and(warp::filters::query::query())
         .and(with_data(image_directory))
-        .and_then(resize);
+        .map(resize)
+        .and_then(no_error);
 
     let routes = get_health_check.or(get_resize);
 
