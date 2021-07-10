@@ -1,0 +1,9 @@
+image_directory: ./images
+
+log:
+  directive: trace
+  directory: ./logs
+
+http:
+  host: 127.0.0.1
+  port: 8081
